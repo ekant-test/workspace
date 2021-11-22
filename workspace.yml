@@ -1,0 +1,165 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: AWS CFN to Create workspace which will take inputs from csv file in s3 bucket
+Parameters:
+  S3BucketName:
+    Description: Give the Name Of S3 Bucket to create and in which you will store CSV file.
+    Type: String
+Resources:
+  S3BucketPartnerData:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: Private
+      BucketName: !Ref S3BucketName
+      NotificationConfiguration:
+        LambdaConfigurations:
+        - Event: 's3:ObjectCreated:*'
+          Function: !GetAtt WorkspaceLambdaFunction.Arn
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+  ExampleInvokePermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: WorkspaceLambdaFunction
+    Properties:
+      FunctionName: !Ref WorkspaceLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn:
+        Fn::Sub: arn:aws:s3:::${S3BucketName}
+      SourceAccount: !Ref AWS::AccountId
+  LambdaIAMRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'workspaces:CreateWorkspaces'
+                  - 'workspaces:DescribeWorkspaces'
+                  - 'workspaces:RebootWorkspaces'
+                  - 'workspaces:RebuildWorkspaces'
+                  - 'workspaces:TerminateWorkspaces'
+                  - 'workspaces:DescribeWorkspaceDirectories'
+                  - 'workspaces:DescribeWorkspaceBundles'
+                  - 'workspaces:ModifyWorkspaceProperties'
+                  - 'workspaces:StopWorkspaces'
+                  - 'workspaces:StartWorkspaces'
+                  - 'workspaces:DescribeWorkspacesConnectionStatus'
+                  - 'workspaces:CreateTags'
+                  - 'workspaces:DeleteTags'
+                  - 'workspaces:DescribeTags'
+                  - 'kms:ListKeys'
+                  - 'kms:ListAliases'
+                  - 'kms:DescribeKey'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - !Sub arn:aws:s3:::${S3BucketName}
+                  - !Sub arn:aws:s3:::${S3BucketName}/*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+  WorkspaceLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: createworkspace
+      Handler: index.lambda_handler
+      Role: !GetAtt
+        - LambdaIAMRole
+        - Arn
+      Environment:
+        Variables:
+          Env1: !Ref S3BucketName
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import csv
+          import os
+
+          client = boto3.client('workspaces')
+
+          def create_workspaces (var):
+              msg = []
+              error = []
+              username = var[1]
+              directoryid = var[2]
+              bundleid = var[3]
+              runningmode = var[4]
+              response = client.create_workspaces(
+               Workspaces=[
+                  {
+                      'DirectoryId': directoryid,
+                      'UserName': username,
+                      'BundleId': bundleid,
+                      'WorkspaceProperties': {
+                          'RunningMode': runningmode
+                      },
+                      'Tags': [
+                          {
+                              'Key': 'Name',
+                              'Value': username+'-workspace',
+                          },
+                          {
+                              'Key': 'DirectoryId',
+                              'Value': directoryid,
+                          }
+                              ]
+                          },
+                      ]
+                 )
+              if not response['FailedRequests']:
+                  msg = 'Your WorksSpace is being provisioned.'
+              else:
+                  error = response['FailedRequests']
+                  for l in error:
+                      msg.append(str(l['ErrorMessage']))
+                      msg = msg[0]
+
+              answer = {}
+              answer["dialogAction"] = {}
+              answer["dialogAction"]["type"] = "ElicitIntent"
+              answer["dialogAction"]["message"] = {}
+              answer["dialogAction"]["message"]["contentType"] = "PlainText"
+              answer["dialogAction"]["message"]["content"] = msg
+
+
+
+              return answer
+
+          def lambda_handler(event, context):
+              var = []
+              first = 1
+              s3 = boto3.client('s3')
+              BUCKET = os.environ['Env1']
+              csvfile = s3.get_object(Bucket=BUCKET, Key='Users.csv')
+              csvcontent = csvfile['Body'].read().decode("utf-8")
+              splitinnewline = csvcontent.split()
+              for split in splitinnewline:
+                  if first == 1:
+                      first = 0
+                  else:
+                      data = split.split(",")
+                      abc = create_workspaces (data)
+                      print (abc)
+      Runtime: python3.6
+      Timeout: 25
